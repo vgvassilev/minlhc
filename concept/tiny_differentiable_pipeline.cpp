@@ -76,6 +76,7 @@ struct Calibration {
   double gain;        ///< Electronics gain (calibration parameter)
   double noiseSigma;  ///< Electronic noise
   double scale = 1.0; ///< Global energy scale (new)
+  double offset = 2.0;///< The "Unmodeled Loss"
 };
 
 struct Score {
@@ -213,7 +214,8 @@ inline std::vector<Electron> reconstruct_pair(const std::vector<Digi> &digis) {
 // Now apply global scale `s = ctx.calib.scale` when forming invariant mass.
 // m = 2 * s * sqrt(E1 * E2)
 inline double invariant_mass(const Electron &e1, const Electron &e2, const EventContext &ctx) {
-  double E1 = e1.E * ctx.calib.scale;
+  // Subtract a constant "loss"
+  double E1 = (e1.E - ctx.calib.offset) * ctx.calib.scale;
   double E2 = e2.E * ctx.calib.scale;
   // numeric guards
   if (E1 <= 0.0 || E2 <= 0.0) return 0.0;
@@ -379,7 +381,10 @@ inline void run_end_to_end_stable() {
   ctx.geom = {5, 10, 10, 1.0};
   ctx.calib = {1.0, 0.05, 1.0}; // gain, noiseSigma, scale
 
-  Particle truth{0, 0, 0, 50.0};
+  //Particle truth{0, 0, 0, 50.0};
+  // If truth is 50, but we assume it's something else,
+  // the optimizer has to work harder to reconcile the mass.
+  Particle truth{0, 0, 0, 45.0}; // Generator truth is 45 GeV
 
   // Build dataset (precompute hits so scans are deterministic)
   const int N = 200;
