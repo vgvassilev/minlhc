@@ -407,12 +407,12 @@ inline void run_end_to_end_stable() {
   }
 
   // --- Optimizer hyperparameters (tuned for stability) ---
-  const double lr_base = 0.1;      // base lr used with median-normalisation
+  const double lr_base = 10;//0.1;      // base lr used with median-normalisation
   const double beta1 = 0.9;        // Adam momentum
   const double beta2 = 0.999;      // Adam second moment
   const double eps = 1e-12;
-  const double max_step = 1e-2;    // absolute clip on raw updates (prevents runaway)
-  const double prior_sigma_s = 0.2; // weak Gaussian prior on scale (centered at 1.0)
+  const double max_step = 0.05;//0.01;    // absolute clip on raw updates (prevents runaway)
+  const double prior_sigma_s = 1.;//0.2; // weak Gaussian prior on scale (centered at 1.0)
 
   double m_g = 0.0, v_g = 0.0;
   double m_s = 0.0, v_s = 0.0;
