@@ -39,3 +39,22 @@
 
 # debug information files
 *.dwo
+
+# Generated analysis outputs (rerun the demo to recreate; see REPRODUCIBILITY.md)
+*.csv
+make_plots.py
+opaque_oracle_demo
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.nav
+*.snm
+*.toc
+*.vrb
+*.pdf
+
+# Editor backup and lock files
+*~
+\#*\#
+.\#*
