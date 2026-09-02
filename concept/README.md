@@ -35,11 +35,7 @@ values.
 In a **differentiable pipeline**, we additionally compute how the likelihood
 *changes* when parameters change:
 
-$
-\[
-\frac{\partial L}{\partial g}, \quad \frac{\partial L}{\partial \theta}
-\]
-$
+$$\frac{\partial L}{\partial g}, \qquad \frac{\partial L}{\partial \theta}$$
 
 Using the chain rule, these derivatives can be propagated backward through the
 entire pipeline. This allows direct, gradient-based optimization of calibration

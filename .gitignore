@@ -58,3 +58,16 @@ opaque_oracle_demo
 *~
 \#*\#
 .\#*
+
+# Slide decks and presentation material (kept outside the repository)
+slides-*
+MinLHC*
+*.pptx
+*.tiff
+
+# Generated figures are regenerable and stay untracked, except the two
+# SVGs the README embeds (negated below, so plain `git add` works)
+*.png
+*.svg
+!plot_oracle_payoff.svg
+!plot_toy_ensemble.svg

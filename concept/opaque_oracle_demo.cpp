@@ -31,6 +31,17 @@
 //   T4  Joint (g,μ) optimizer recovers injected truth; classical 1D scan
 //       over g with μ held at nominal lands at a biased point (the
 //       "preconception trap" for an opaque nuisance).
+//   T6  Mean-level score control. The per-event score used above is a
+//       mean-target pseudo-likelihood, Σ_e (r_e − T)² = N[(r̄ − T)² + Var r];
+//       its Var term rewards variance shrinkage and displaces the optimum
+//       from truth (measured by a 50-toy ensemble). T6 scans an objective
+//       built on the ensemble MEAN — the Var term absent by construction —
+//       and checks that its optimum returns to the injected truth,
+//       localizing the T4 offset in the score, not the operator machinery.
+//
+// An oracle-call ledger is printed at the end of the run so the cost
+// accounting (extractions, fit forwards, falsifier share) is a measured
+// output of the program rather than a hand derivation.
 //
 // Deliberate pedagogical simplifications:
 //   - noise σ = 0 everywhere (orthogonal to the thesis, easy to add back).
@@ -109,6 +120,17 @@ inline void decode_cell(int cellId, const DetectorGeometry& g,
 }
 
 // ---------------------------------------------------------------------------
+// Oracle-call ledger (instrumentation)
+// ---------------------------------------------------------------------------
+
+/// Incremented once per simulate_shower call. A namespace-scope mutable is a
+/// deliberate exception to the usual no-globals rule: threading a ledger
+/// through every signature would obscure the physics this single-file,
+/// single-threaded teaching demo exists to show. It never touches any RNG
+/// path, so all physics numbers are unchanged by its presence.
+inline uint64_t g_oracle_calls = 0;
+
+// ---------------------------------------------------------------------------
 // The opaque oracle (stochastic, treated as a black box)
 // ---------------------------------------------------------------------------
 
@@ -121,6 +143,7 @@ inline std::vector<CaloHit> simulate_shower(const Particle& p, double mu,
                                             std::mt19937& rng,
                                             const DetectorGeometry& geom,
                                             int hitsPerLayer) {
+  ++g_oracle_calls;
   std::normal_distribution<double> unit(0.0, 1.0);
   std::uniform_real_distribution<double> fluct(0.9, 1.1);
   std::vector<CaloHit> hits;
@@ -608,6 +631,49 @@ inline ScanResult classical_scan_g(const std::vector<Particle>& particles,
 }
 
 // ---------------------------------------------------------------------------
+// T6: mean-level score control
+// ---------------------------------------------------------------------------
+
+/// Optima of two objectives along one calibration axis through truth,
+/// computed from the SAME simulated events per scan point:
+///   per-event score  Σ_e log_lik_pair(r_e, T)   (the score used everywhere
+///                    above; carries the variance-penalty term), and
+///   mean-level score −[(r̄_c − T_c)² + (r̄_h − T_h)²]  (variance term absent
+///                    by construction).
+struct AxisOptima { double best_mean; double best_evt; };
+
+inline AxisOptima t6_axis_scan(const Dataset& ds, const DetectorGeometry& geom,
+                               int r_core, int r_halo, int hitsPerLayer,
+                               const Calibration& truth, bool scan_gain,
+                               double lo, double hi, double step,
+                               double sigma, uint64_t seed) {
+  AxisOptima out{lo, lo};
+  double Lm = -std::numeric_limits<double>::infinity();
+  double Le = -std::numeric_limits<double>::infinity();
+  for (double v = lo; v <= hi + 1e-12; v += step) {
+    Calibration c = truth;
+    (scan_gain ? c.gain : c.mu) = v;
+    std::mt19937 rng(seed);
+    double evt = 0.0, sum_c = 0.0, sum_h = 0.0;
+    for (const auto& p : ds.particles) {
+      auto hits = simulate_shower(p, c.mu, rng, geom, hitsPerLayer);
+      auto digs = digitize(hits, c, geom, rng);
+      RecoPair r = reconstruct(digs, geom, r_core, r_halo);
+      evt += log_lik_pair(r, ds.target, sigma);
+      sum_c += r.E_core;
+      sum_h += r.E_halo;
+    }
+    double n = double(ds.particles.size());
+    double mc = sum_c / n - ds.target.E_core;
+    double mh = sum_h / n - ds.target.E_halo;
+    double mean_score = -(mc * mc + mh * mh);
+    if (mean_score > Lm) { Lm = mean_score; out.best_mean = v; }
+    if (evt > Le) { Le = evt; out.best_evt = v; }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Joint optimizer (Adam on (g, μ)) with optional periodic J refresh
 // ---------------------------------------------------------------------------
 
@@ -767,9 +833,20 @@ inline int run() {
   Particle probe{0.0, 0.0, 0.0, 45.0};
 
   const int N = 2000;
+
+  // Oracle-call ledger: phase-boundary snapshots of g_oracle_calls, printed
+  // at the end so the cost accounting is a measured output.
+  std::vector<std::pair<const char*, uint64_t>> ledger;
+  uint64_t last_calls = g_oracle_calls;
+  auto mark = [&](const char* label) {
+    ledger.push_back({label, g_oracle_calls - last_calls});
+    last_calls = g_oracle_calls;
+  };
+
   Dataset ds = make_dataset(N, geom, truth, r_core, r_halo, hitsPerLayer,
                             /*seed=*/2024);
   cache_nominal_digis(ds, geom, nominal, hitsPerLayer, /*seed=*/42);
+  mark("dataset generation + cache");
 
   std::printf("\n==== Opaque-oracle demo =========================================\n");
   std::printf("Truth:   g=%.3f  μ=%.3f\n", truth.gain, truth.mu);
@@ -790,6 +867,7 @@ inline int run() {
   std::printf("Extracted J at μ₀=%.3f using %d matched-seed oracle runs "
               "(ε=%.0e, %zu non-zero cells)\n",
               J.mu0, J.nSeeds, j_eps, J.dE_dmu.size());
+  mark("initial J extraction (T1/T2 input)");
 
   // ----- tests ------------------------------------------------------------
   std::printf("\n---- Diagnostics -----------------------------------------------\n");
@@ -797,16 +875,19 @@ inline int run() {
   auto t1a = t1_fd_vs_adjoint_g(ds, geom, r_core, r_halo, hitsPerLayer,
                                 nominal, J, sigma, /*seed=*/42);
   print_result(t1a); fails += !t1a.ok;
+  mark("T1a FD + adjoint pass");
 
   auto t1b = t1_fd_vs_adjoint_mu(ds, geom, r_core, r_halo, hitsPerLayer,
                                  nominal, J, sigma, /*seed=*/42);
   print_result(t1b); fails += !t1b.ok;
+  mark("T1b FD + adjoint pass");
 
   auto t2 = t2_two_J_predictions_agree(ds, geom, r_core, r_halo,
                                        hitsPerLayer, nominal, J,
                                        sigma, /*dmu_test=*/0.02,
                                        /*base_seed=*/0xC0FFEEu + 1);
   print_result(t2); fails += !t2.ok;
+  mark("T2 second extraction (predictions: 0 calls)");
 
   // Scan μ around nominal for T3 and the linearity-window plot
   MuScan mu_s = scan_mu(ds, geom, r_core, r_halo, hitsPerLayer, nominal,
@@ -817,6 +898,7 @@ inline int run() {
   print_result(t3); fails += !t3.ok;
 
   write_mu_scan_csv("mu_scan.csv", mu_s);
+  mark("T3 brute-force μ-scan (linearized side: 0)");
 
   // ----- classical 1D g-scan at nominal μ (the "preconception trap") ------
   std::vector<double> gs_scan, Ls_scan;
@@ -827,6 +909,7 @@ inline int run() {
   write_gscan_csv("gscan_nominal_mu.csv", gs_scan, Ls_scan);
   std::printf("\nClassical 1D g-scan (μ held at %.3f): best_g=%.4f  L=%.3f\n",
               nominal.mu, classical.best_g, classical.best_logL);
+  mark("T5 classical g-scan");
 
   // ----- joint (g, μ) optimizer -------------------------------------------
   const int nIters = 800;
@@ -844,6 +927,7 @@ inline int run() {
   std::printf("Joint optimizer (Adam, %d iters, J refreshed every 50):\n"
               "  final g=%.4f  μ=%.4f  L=%.3f\n",
               nIters, final_joint.gain, final_joint.mu, final_joint_L);
+  mark("joint fit (17 J extractions + 800 forwards)");
 
   // Diagnostic: brute-force L at truth and a nearby grid of the optimizer
   // endpoint lets us see whether we've converged to a local minimum or
@@ -852,6 +936,7 @@ inline int run() {
                                 hitsPerLayer, ds.target, sigma, /*seed=*/42);
   std::printf("  diagnostic:  L_brute at truth = %.3f (optimum should be ≥ this)\n",
               L_truth);
+  mark("truth diagnostic");
 
   // ----- T4: truth recovery -----------------------------------------------
   double err_g  = std::fabs(final_joint.gain - truth.gain) / truth.gain;
@@ -869,6 +954,32 @@ inline int run() {
                 cbias > 0.01, cbias, 0.01, "lower bound (bias expected)"};
   print_result(t5); fails += !t5.ok;
 
+  // ----- T6: mean-level score control -------------------------------------
+  // Same simulated events per scan point feed both objectives; only the
+  // scoring differs. The per-event score's optima sit off truth (its Var
+  // term rewards variance shrinkage); the mean-level score's optima must
+  // return to truth within the grid step, localizing the T4 offset in the
+  // score function.
+  AxisOptima ax_g = t6_axis_scan(ds, geom, r_core, r_halo, hitsPerLayer,
+                                 truth, /*scan_gain=*/true,
+                                 /*lo=*/0.90, /*hi=*/1.10, /*step=*/0.01,
+                                 sigma, /*seed=*/42);
+  AxisOptima ax_m = t6_axis_scan(ds, geom, r_core, r_halo, hitsPerLayer,
+                                 truth, /*scan_gain=*/false,
+                                 /*lo=*/0.75, /*hi=*/0.95, /*step=*/0.01,
+                                 sigma, /*seed=*/42);
+  double t6_dev = std::max(std::fabs(ax_g.best_mean - truth.gain),
+                           std::fabs(ax_m.best_mean - truth.mu));
+  char t6note[96];
+  std::snprintf(t6note, sizeof(t6note),
+                "mean-score optima g=%.2f μ=%.2f; per-event g=%.3f μ=%.3f",
+                ax_g.best_mean, ax_m.best_mean,
+                ax_g.best_evt, ax_m.best_evt);
+  TestResult t6{"T6 Mean-level score is unbiased on the truth axes",
+                t6_dev <= 0.015, t6_dev, 0.015, t6note};
+  print_result(t6); fails += !t6.ok;
+  mark("T6 objective scans (both scores, shared events)");
+
   write_summary_csv("summary.csv", truth, nominal, ds.target,
                     classical.best_g, classical.best_logL,
                     final_joint, final_joint_L);
@@ -876,6 +987,25 @@ inline int run() {
   std::printf("\nCSVs written: mu_scan.csv, gscan_nominal_mu.csv, "
               "opt_path.csv, summary.csv\n");
   std::printf("Plot:  python3 concept/plot_oracle_demo.py\n");
+
+  // ----- oracle-call ledger -----------------------------------------------
+  std::printf("\n---- Oracle-call ledger ----------------------------------------\n");
+  uint64_t total = 0, falsifier = 0;
+  for (const auto& e : ledger) total += e.second;
+  for (const auto& e : ledger) {
+    std::printf("  %-46s %10llu\n", e.first,
+                (unsigned long long)e.second);
+    // Falsifier side = every phase except building the dataset and the fit
+    // itself; the initial J extraction serves the T1/T2 checks.
+    std::string label(e.first);
+    if (label.rfind("dataset", 0) != 0 && label.rfind("joint fit", 0) != 0)
+      falsifier += e.second;
+  }
+  std::printf("  %-46s %10llu\n", "total",
+              (unsigned long long)total);
+  std::printf("  falsifier share (all checks / total): %.1f%%\n",
+              100.0 * double(falsifier) / double(total));
+
   std::printf("\n==== %d failure(s) ================================================\n\n",
               fails);
   return fails;
